@@ -7,7 +7,10 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 
-#define MAXLINE 1024
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#define MAXLINE 64000
 #define MAXLISTEN 10
 
 void serve(int);
@@ -62,7 +65,6 @@ int main( int argc, char *argv[] )
     if( (connfd = accept(listenfd, (struct sockaddr *) &cliaddr, &len)) < 0 )
     {
       perror("Accept()");
-      //fprintf(stderr, "ERROR! Problem in accept()\n");
       return -1;
     }
 
@@ -79,16 +81,17 @@ int main( int argc, char *argv[] )
 
 void serve(int connfd)
 {
-  char buff[MAXLINE];
+  char buf[MAXLINE];
   int count;
-  while( (count = read( connfd, buff, MAXLINE-1 )) > 0 )
+  char test[] = "HTTP/1.1 403 Forbidden\r\n\r\n<b>No more interwebs for you Bretti! :D<br />-Adam</b>";
+  while( (count = read( connfd, buf, MAXLINE )) > 0 )
   {
-    buff[count] = '\0';
-    printf("CHILD %d: My client said \"%s\"!\n", getpid(), buff);
-    if( write(connfd, buff, strlen(buff)) < 0 )
-    {
-      fprintf(stderr, "CHILD %d: Failed my write call\n", getpid());
-      return;
-    }
+    buf[count] = '\0';
+    printf("%s", buf);
+    if( strstr(buf, "\r\n\r\n") != NULL )
+      break;
   }
+  write( connfd, test, strlen(test) );
+
+  return;
 }
