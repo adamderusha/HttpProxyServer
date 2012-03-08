@@ -14,7 +14,7 @@
 #include <signal.h>
 #include <errno.h>
 
-#define MAXLINE 512
+#define MAXLINE 1024
 #define MAXLISTEN 10
 
 /* HTTP Types */
@@ -137,13 +137,17 @@ void serveClient( int connfd )
   char *input = NULL;
   int method;
   struct headers *headers = NULL;
+  int i;
 
   printf("Child %d: reading from client\n", getpid());
-  if( (input = readRequest(connfd)) == NULL )
+  if( (input = readResponse(connfd)) == NULL )
   {
     printf("Read error\n");
     return;
   }
+
+  printf("CLIENT BROWSWER SAID:\n");
+  printf("%s\n",input);
   
   splitHeaders(input, &headers);
 
@@ -162,17 +166,27 @@ void serveClient( int connfd )
     printf("Couldn't not establish connection to %s\n", hostname);
     freeHeaders(headers); 
     free(input);
+    free(hostname);
     return;
   }
+  free(hostname);
 
+  printf("Writing to Main Server\n");
   write(sock, input, strlen(input));
   free(input);
+
+  printf("Reading response\n");
   input = readResponse(sock); /* read response */
+  printf("CLIENT SAID:\n");
+  printf("%s\n",input);
   close(sock);
   freeHeaders(headers);
 
   printf("Child %d: writing to client\n", getpid());
-  write( connfd, input, strlen(input) );
+  for( i = 0; i < strlen(input); ++i )
+  {
+    write( connfd, &(input[i]), 1);
+  }
   free(input);
   return;
 }
@@ -339,45 +353,57 @@ char *findValue( struct headers *head, char *key )
   return NULL;
 }
 
+
 char *readResponse( int connfd )
 {
-  char *finalMessage = NULL;
-  int sizeOfMessage = 0;
-  int count;
+  char *response = NULL;
+  int read_count = 0;
   char buffer[MAXLINE];
-  int readSomething = 0;
-  char *temp = NULL;
+  struct headers *p = NULL;
+  int content_length = -1;
 
-  int flags = fcntl(connfd, F_GETFL, 0);
-  fcntl(connfd, F_SETFL, flags | O_NONBLOCK);
-
-  while( (count = read( connfd, buffer, MAXLINE-1 )) > 0 || !readSomething )
+  response = (char *) malloc(1);
+  response[0] = '\0';
+  while( (read_count = read(connfd, buffer, MAXLINE-1)) > 0 )
   {
-    if( count < 0 )
-      continue;
+    /* Build new string */
+    int old_length = strlen(response);
+    char *temp = (char *) malloc(old_length+read_count+1);
+    memcpy(temp,response,old_length);
+    memcpy(temp+old_length, buffer, read_count);
+    temp[old_length+read_count] = '\0';
+    free(response);
+    response = temp;
 
-    temp = (char *) malloc( count + sizeOfMessage + 1 );
-    readSomething = 1;
-    if( finalMessage != NULL )
+
+    /* Check for all the headers read */
+    temp = strstr(response, "\r\n\r\n");
+    if( temp != NULL && p == NULL )
     {
-      memcpy(temp, finalMessage, sizeOfMessage);
-      memcpy(temp+sizeOfMessage, buffer, count);
-      free(finalMessage);
+      char *headers = (char *) malloc(temp-response);
+      char *value = NULL;
+      memcpy(headers, response, temp-response-1);
+      headers[temp-response] = '\0';
+      splitHeaders(headers, &p);
+      free(headers);
+
+      value = findValue(p, "Content-Length");
+      if( value == NULL )
+        break;
+      content_length = atoi(value);
+      free(value);
     }
-    else
+
+    if( temp != NULL && content_length > 0 )
     {
-      memcpy(temp, buffer, count);
+      int content_size = -1;
+      temp += 4;
+      content_size = strlen(temp);
+      
+      if( content_length == content_size )
+        break;
     }
-    sizeOfMessage += count;
-    finalMessage = temp;
   }
-  if( finalMessage != NULL )
-    finalMessage[sizeOfMessage] = '\0';
-  printf("Count = %d\n", count);
-  return finalMessage;
+  freeHeaders(p);
+  return response;
 }
-
-
-
-
-
