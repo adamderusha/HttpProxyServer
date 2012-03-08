@@ -48,6 +48,7 @@ int getHTTPversion( char * );
 int getMethodType( char * );
 int establishConnection( int *sock, char *hostname );
 char *findValue( struct headers *head, char *key );
+int transfer( int clientfd, int serverfd, char *request_line );
 
 int main( int argc, char *argv[] )
 {
@@ -130,7 +131,6 @@ int main( int argc, char *argv[] )
   return EXIT_SUCCESS;
 }
 
-//*
 void serveClient( int connfd )
 {
   char badResponse[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 22\r\nContent-Type: text/html\r\n\r\n<h1>403 Forbidden</h1>\r\n";
@@ -171,58 +171,13 @@ void serveClient( int connfd )
   }
   free(hostname);
 
-  printf("Writing to Main Server\n");
-  write(sock, input, strlen(input));
-  free(input);
-
-  printf("Reading response\n");
-  input = readResponse(sock); /* read response */
-  printf("CLIENT SAID:\n");
-  printf("%s\n",input);
-  close(sock);
+  i = transfer(connfd, sock, input);
   freeHeaders(headers);
-
-  printf("Child %d: writing to client\n", getpid());
-  for( i = 0; i < strlen(input); ++i )
-  {
-    write( connfd, &(input[i]), 1);
-  }
   free(input);
+
   return;
 }
-/**/
 
-char *readRequest( int connfd )
-{
-  char *finalMessage = NULL;
-  int sizeOfMessage = 0;
-  int count;
-  char buffer[MAXLINE];
-  while( (count = read( connfd, buffer, MAXLINE-1)) > 0 )
-  {
-    char *temp = (char *) malloc( count + sizeOfMessage + 1 );
-    if( finalMessage != NULL )
-    {
-      memcpy(temp, finalMessage, sizeOfMessage);
-      memcpy(temp+sizeOfMessage, buffer, count);
-      free(finalMessage);
-    }
-    else
-    {
-      memcpy(temp, buffer, count);
-    }
-    sizeOfMessage += count;
-    finalMessage = temp;
-  
-    temp = strstr(finalMessage, "\r\n\r\n");
-    if( temp != NULL )
-    {
-      *(temp+4) = '\0';
-      return finalMessage;
-    }
-  }
-  return NULL;
-}
 
 int getRequestInfo( char *message, struct request *info )
 {
@@ -406,4 +361,21 @@ char *readResponse( int connfd )
   }
   freeHeaders(p);
   return response;
+}
+
+int transfer( int clientfd, int serverfd, char *request_line )
+{
+  char buffer[MAXLINE];
+  int count;
+
+  write( serverfd, request_line, strlen(request_line) );
+  while( (count = recv(serverfd, buffer, MAXLINE, MSG_WAITALL)) > 0 )
+  {
+    write(clientfd, buffer, count);
+    if(count < MAXLINE)
+    {
+      break;
+    }
+  }
+  return 1;
 }
