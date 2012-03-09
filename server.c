@@ -14,7 +14,7 @@
 #include <signal.h>
 #include <errno.h>
 
-#define MAXLINE 1024
+#define MAXLINE 4096
 #define MAXLISTEN 10
 
 /* HTTP Types */
@@ -31,6 +31,7 @@ struct request
   int method;
   int type;
   char *resource;
+  char *full_resource;
 };
 
 struct headers
@@ -39,16 +40,16 @@ struct headers
   struct headers *next;
 };
 
-void serveClient(int);
+void serveClient(int connfd, char *client_name, char *blacklist[], int blacklistsize );
 char *readRequest( int connfd );
 char *readResponse( int connfd );
 void splitHeaders( char *message, struct headers **output );
 void freeHeaders( struct headers *input );
-int getHTTPversion( char * );
-int getMethodType( char * );
+int getRequestInfo( char *message, struct request **info );
 int establishConnection( int *sock, char *hostname );
 char *findValue( struct headers *head, char *key );
 int transfer( int clientfd, int serverfd, char *request_line );
+int check_blacklist( char *word, char *blacklist[], int size );
 
 int main( int argc, char *argv[] )
 {
@@ -119,10 +120,13 @@ int main( int argc, char *argv[] )
 
     if( (pid = fork()) == 0 ) /* Child */
     {
-      printf("Child %d: Serving a client\n", getpid());
-      serveClient( connfd );
+      struct hostent *hp;
+      hp = gethostbyaddr( (char *) &cliaddr.sin_addr.s_addr, sizeof(cliaddr.sin_addr.s_addr), AF_INET);
+      //printf("Child %d: Serving a client\n", getpid());
+      
+      serveClient( connfd, hp->h_name, argv+2, argc-2);
       close( connfd );
-      printf("Child %d: done serving a client\n", getpid());
+      //printf("Child %d: done serving a client\n", getpid());
       exit(0);
     }
     close( connfd );
@@ -131,36 +135,85 @@ int main( int argc, char *argv[] )
   return EXIT_SUCCESS;
 }
 
-void serveClient( int connfd )
+void serveClient(int connfd, char *client_name, char *blacklist[], int blacklistsize )
 {
   char badResponse[] = "HTTP/1.1 403 Forbidden\r\nContent-Length: 22\r\nContent-Type: text/html\r\n\r\n<h1>403 Forbidden</h1>\r\n";
   char *input = NULL;
-  int method;
   struct headers *headers = NULL;
-  int i;
 
-  printf("Child %d: reading from client\n", getpid());
+  //printf("Child %d: reading from client\n", getpid());
   if( (input = readResponse(connfd)) == NULL )
   {
     printf("Read error\n");
     return;
   }
 
-  printf("CLIENT BROWSWER SAID:\n");
-  printf("%s\n",input);
+  //printf("CLIENT BROWSWER SAID:\n");
+  //printf("%s\n",input);
   
   splitHeaders(input, &headers);
 
-  if( (method = getMethodType(headers->header)) < 0 )
+//  if( (method = getMethodType(headers->header)) < 0 )
+//  {
+//    printf("ERROR: Could not get HTTP method\n");
+//    freeHeaders(headers);
+//    free(input);
+//    return;
+//  }
+
+  int sock;
+  //char *hostname = findValue(headers, "Host");
+  char *hostname = NULL;
+  struct request *r;
+
+  if( getRequestInfo(headers->header, &r) < 0 )
   {
-    printf("ERROR: Could not get HTTP method\n");
     freeHeaders(headers);
     free(input);
     return;
   }
+ 
+  if( r->type == HTTP1_1 )
+  {
+    free(r->resource);
+    hostname = findValue(headers, "Host");
+    if( hostname == NULL )
+    {
+      freeHeaders(headers);
+      free(input);
+      return;
+    }
+  }
+  else if( r->type == HTTP1_0 )
+  {
+    hostname = r->resource;
+  }
 
-  int sock;
-  char *hostname = findValue(headers, "Host");
+  printf("%s: ", client_name);
+  if( r->method == GET )
+    printf("GET ");
+  else if( r->method == POST )
+    printf("POST ");
+  else if( r->method == HEAD )
+    printf("HEAD ");
+  else
+  {
+  }
+  printf("%s ", r->full_resource);
+  free(r->full_resource);
+  free(r);
+  
+  if( check_blacklist( hostname, blacklist, blacklistsize ) )
+  {
+    printf("[FILTERED]\n");
+    freeHeaders(headers); 
+    free(input);
+    free(hostname);
+    write(connfd, badResponse, strlen(badResponse));
+    return;
+  }
+  printf("\n");
+
   if( establishConnection( &sock, hostname ) < 0 )
   {
     printf("Couldn't not establish connection to %s\n", hostname);
@@ -171,21 +224,67 @@ void serveClient( int connfd )
   }
   free(hostname);
 
-  i = transfer(connfd, sock, input);
+  transfer(connfd, sock, input);
   freeHeaders(headers);
   free(input);
 
   return;
 }
 
-
-int getRequestInfo( char *message, struct request *info )
+int getRequestInfo( char *message, struct request **info )
 {
-  char *start = message;
+  char *start = strdup(message);
+  char *piece = NULL;
+  char *temp = NULL;
   while( *start == ' ' ) /* Skip any leading whitespace */
     ++start;
-  return 0;
 
+  *info = (struct request *) malloc( sizeof(struct request));
+
+  if( (piece = strtok(start, " ")) == NULL )
+    return -1;
+  
+  if( strncmp(piece, "GET", 3) == 0 )
+    (*info)->method = GET;
+  else if( strncmp(piece, "POST", 4) == 0 )
+    (*info)->method = POST;
+  else if( strncmp(piece, "HEAD", 4) == 0 )
+    (*info)->method = HEAD;
+  else
+    return -1;
+
+  if( (piece = strtok(NULL, " ")) == NULL )
+    return -1;
+
+  (*info)->full_resource = strdup(piece);
+  if( (temp = strstr(piece, "://")) != NULL )
+  {
+    piece = temp+3;
+  }
+  if( (temp = strstr(piece, "/")) != NULL )
+  {
+    piece[temp-piece] = '\0';
+  }
+  (*info)->resource = strdup(piece);
+
+  if( (piece = strtok(NULL, " ")) == NULL )
+    return -1;
+
+  if( strncmp(piece, "HTTP/1.1", 8) == 0 )
+  {
+    (*info)->type = HTTP1_1;
+  }
+  else if( strncmp(piece, "HTTP/1.0", 8) == 0 )
+  {
+    (*info)->type = HTTP1_0;
+  }
+  else
+  {
+    return -1;
+  }
+  free(start);
+  
+  return 0;
 }
 
 int getHTTPversion( char *message )
@@ -315,7 +414,6 @@ char *readResponse( int connfd )
   int read_count = 0;
   char buffer[MAXLINE];
   struct headers *p = NULL;
-  int content_length = -1;
 
   response = (char *) malloc(1);
   response[0] = '\0';
@@ -330,33 +428,11 @@ char *readResponse( int connfd )
     free(response);
     response = temp;
 
-
     /* Check for all the headers read */
     temp = strstr(response, "\r\n\r\n");
-    if( temp != NULL && p == NULL )
+    if( temp != NULL )
     {
-      char *headers = (char *) malloc(temp-response);
-      char *value = NULL;
-      memcpy(headers, response, temp-response-1);
-      headers[temp-response] = '\0';
-      splitHeaders(headers, &p);
-      free(headers);
-
-      value = findValue(p, "Content-Length");
-      if( value == NULL )
-        break;
-      content_length = atoi(value);
-      free(value);
-    }
-
-    if( temp != NULL && content_length > 0 )
-    {
-      int content_size = -1;
-      temp += 4;
-      content_size = strlen(temp);
-      
-      if( content_length == content_size )
-        break;
+      break;
     }
   }
   freeHeaders(p);
@@ -378,4 +454,22 @@ int transfer( int clientfd, int serverfd, char *request_line )
     }
   }
   return 1;
+}
+
+int check_blacklist( char *word, char *blacklist[], int size )
+{
+  int i;
+  for( i = 0; i < size; ++i )
+  {
+    char *temp = NULL;
+    if(strncmp(word, blacklist[i], strlen(blacklist[i])) == 0)
+    {
+      return 1;
+    }
+    if( (temp = strstr(word,blacklist[i])) != NULL && strcmp(temp, blacklist[i]) == 0 )
+    {
+      return 1;
+    }
+  }
+  return 0;
 }
