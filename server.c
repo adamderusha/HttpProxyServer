@@ -1,3 +1,10 @@
+/******************************************/
+/*             Adam DeRusha               */
+/*            derusa@rpi.edu              */
+/*              Project 2                 */
+/*            Due: 3/12/2012              */
+/******************************************/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -22,19 +29,20 @@
 #define HTTP1_0 0
 
 /* Method Types */
+#define BAD_METHOD -1
 #define GET 0
 #define POST 1
 #define HEAD 2
 
 struct request
 {
-  int method;
-  int type;
-  char *resource;
+  int method;          /* GET, POST, HEAD */
+  int type;            /* HTTP/1.1 or HTTP/1.0 */
+  char *resource; 
   char *full_resource;
-  int error;
 };
 
+/* Linked list node for the headers */
 struct headers
 {
   char *header;
@@ -50,7 +58,7 @@ int establishConnection( int *sock, char *hostname );
 char *findValue( struct headers *head, char *key );
 int transfer( int clientfd, int serverfd, char *request_line );
 int check_blacklist( char *word, char *blacklist[], int size );
-void print_client_request( char *client_name, struct request *r );
+void print_client_request( char *client_name, char *req );
 void freeRequestInfo( struct request *r );
 
 int main( int argc, char *argv[] )
@@ -75,22 +83,25 @@ int main( int argc, char *argv[] )
     return EXIT_FAILURE;
   }
 
+  /* Set up the signal handlers */
   sigemptyset( &sigact.sa_mask );
   sigact.sa_flags = 0 | SA_NODEFER | SA_RESETHAND;
   sigact.sa_handler = SIG_IGN;
 
   sigaction( SIGCHLD, &sigact, NULL); /* To prevent zombie processes */
-  //sigaction( SIGINT, &sigact, NULL);  /* To ignore keyboard interupts */
+  sigaction( SIGINT, &sigact, NULL);  /* To ignore keyboard interupts */
 
+  /* Request a server socket */
   if( (listenfd = socket(AF_INET, SOCK_STREAM, 0)) < 0 )
   {
     fprintf(stderr, "ERROR! Could not create listener socket\n");
     return EXIT_FAILURE;
   }
 
+  /* Fill out and bind the server socket */
   bzero(&servaddr, sizeof(servaddr));
   servaddr.sin_family = AF_INET;
-  servaddr.sin_addr.s_addr = htonl(INADDR_ANY); /* Might need to change this IP */
+  servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
   servaddr.sin_port = htons(port);
 
   if( bind(listenfd, (struct sockaddr *) &servaddr, sizeof(servaddr)) < 0 )
@@ -105,14 +116,14 @@ int main( int argc, char *argv[] )
     return EXIT_FAILURE;
   }
 
-  /* Create children */
-
+  /* Start the server process */
   while( 1 )
   {
+    /* Get a client */
     len = sizeof(cliaddr);
     if( (connfd = accept(listenfd, (struct sockaddr *) &cliaddr, &len)) < 0 )
     {
-      if( errno == EINTR ) /* May not need this if... */
+      if( errno == EINTR )
       {
         continue;
       }
@@ -120,14 +131,16 @@ int main( int argc, char *argv[] )
       return EXIT_FAILURE;
     }
 
+    /* Pass the client to a child process */
     if( (pid = fork()) == 0 ) /* Child */
     {
+      /* Get the hostname */
       struct hostent *hp;
       hp = gethostbyaddr( (char *) &cliaddr.sin_addr.s_addr, sizeof(cliaddr.sin_addr.s_addr), AF_INET);
       
       serveClient( connfd, hp->h_name, argv+2, argc-2);
       close( connfd );
-      exit(0);
+      exit(EXIT_SUCCESS);
     }
     close( connfd );
   }
@@ -145,26 +158,38 @@ void serveClient(int connfd, char *client_name, char *blacklist[], int blacklist
   int sock;
   char *hostname = NULL;
   struct request *r;
-  int err = 0;
 
+  /* Read the request from the client */
   if( (input = readResponse(connfd)) == NULL )
   {
     return;
   }
 
+  /* Split the headers into a linked list */
   splitHeaders(input, &headers);
-
-  if( (err = getRequestInfo(headers->header, &r)) != 0 )
+  if( headers == NULL )
   {
-    if( err == 2 )
-      write(connfd, notImplemented, strlen(notImplemented));
-    else
-      write(connfd, badRequest, strlen(badRequest));
+    write( connfd, badRequest, strlen(badRequest) );
+    print_client_request( client_name, headers->header );
+    printf("\n");
+    free(input);
+    return;
+  }
+
+  /* Split the request line into type, resource, and HTTP version */
+  getRequestInfo(headers->header, &r);
+  if( r->method < 0 )
+  {
+    write(connfd, notImplemented, strlen(notImplemented));
+    print_client_request( client_name, headers->header );
+    printf("\n");
+    freeRequestInfo(r);
     freeHeaders(headers);
     free(input);
     return;
   }
- 
+
+  /* Get the hostname (who to connect to) */
   if( r->type == HTTP1_1 )
   {
     free(r->resource);
@@ -173,6 +198,8 @@ void serveClient(int connfd, char *client_name, char *blacklist[], int blacklist
     if( hostname == NULL )
     {
       write( connfd, badRequest, strlen(badRequest) );
+      print_client_request( client_name, headers->header );
+      printf("\n");
       freeRequestInfo(r);
       free(hostname);
       freeHeaders(headers);
@@ -186,18 +213,11 @@ void serveClient(int connfd, char *client_name, char *blacklist[], int blacklist
     r->resource = NULL;
   }
 
-  /*else
-  {
-    freeHeaders(headers);
-    free(hostname);
-    freeRequestInfo(r);
-    free(input);
-    write(connfd, notImplemented, strlen(notImplemented));
-    return;
-  }*/
-  print_client_request( client_name, r );
+  /* Print what the client requested */
+  print_client_request( client_name, headers->header );
   freeRequestInfo(r);
-  
+ 
+  /* Check and make sure the client isn't trying to go somewhere bad... */
   if( check_blacklist( hostname, blacklist, blacklistsize ) )
   {
     printf("[FILTERED]\n");
@@ -209,6 +229,7 @@ void serveClient(int connfd, char *client_name, char *blacklist[], int blacklist
   }
   printf("\n");
 
+  /* If client is ok, establish a connection to the server they want to reach */
   if( establishConnection( &sock, hostname ) < 0 )
   {
     write( connfd, badRequest, strlen(badRequest));
@@ -219,6 +240,7 @@ void serveClient(int connfd, char *client_name, char *blacklist[], int blacklist
   }
   free(hostname);
 
+  /* Transfer the data between client and server */
   transfer(connfd, sock, input);
   freeHeaders(headers);
   free(input);
@@ -234,6 +256,7 @@ int getRequestInfo( char *message, struct request **info )
   while( *start == ' ' ) /* Skip any leading whitespace */
     ++start;
 
+  /* Carve space for the request */
   *info = (struct request *) malloc( sizeof(struct request));
   (*info)->resource = NULL;
   (*info)->full_resource = NULL;
@@ -241,11 +264,10 @@ int getRequestInfo( char *message, struct request **info )
   if( (piece = strtok(start, " ")) == NULL )
   {
     free(start);
-    freeRequestInfo(*info);
-    *info = NULL;
     return -1;
   }
-  
+ 
+  /* Figure out whether we're a POST, GET, HEAD, or other */
   if( strncmp(piece, "GET", 3) == 0 )
     (*info)->method = GET;
   else if( strncmp(piece, "POST", 4) == 0 )
@@ -253,21 +275,15 @@ int getRequestInfo( char *message, struct request **info )
   else if( strncmp(piece, "HEAD", 4) == 0 )
     (*info)->method = HEAD;
   else
-  {
-    free(start);
-    freeRequestInfo(*info);
-    *info = NULL;
-    return -2;
-  }
+    (*info)->method = BAD_METHOD;
 
   if( (piece = strtok(NULL, " ")) == NULL )
   {
     free(start);
-    freeRequestInfo(*info);
-    *info = NULL;
     return -1;
   }
 
+  /* Get the full resource name and then extract the host name */
   (*info)->full_resource = strdup(piece);
   if( (temp = strstr(piece, "://")) != NULL )
   {
@@ -282,11 +298,10 @@ int getRequestInfo( char *message, struct request **info )
   if( (piece = strtok(NULL, " ")) == NULL )
   {
     free(start);
-    freeRequestInfo(*info);
-    *info = NULL;
     return -1;
   }
 
+  /* Figure out whether it's HTTP/1.0 or HTTP/1.1 */
   if( strncmp(piece, "HTTP/1.1", 8) == 0 )
   {
     (*info)->type = HTTP1_1;
@@ -298,10 +313,6 @@ int getRequestInfo( char *message, struct request **info )
   else
   {
     free(start);
-    free((*info)->full_resource);
-    free((*info)->resource);
-    free(*info);
-    *info = NULL;
     return -1;
   }
   free(start);
@@ -314,13 +325,20 @@ void splitHeaders( char *message, struct headers **output )
   struct headers *head;
   char *messageCopy = strdup(message);
   char *header = strtok(messageCopy, "\r\n");
-
+  *output = NULL;
+  if( header == NULL )
+  {
+    return;
+  }
+  
+  /* Create a linked list node */
   (*output) = (struct headers *) malloc(sizeof(struct headers));
   (*output)->header = strdup(header);
   (*output)->next = NULL;
 
   head = *output;
 
+  /* Now we just keep tokenizing the input and add links to the list */
   while( (header = strtok(NULL, "\r\n")) != NULL )
   {
     (*output)->next = (struct headers *) malloc( sizeof(struct headers) );
@@ -339,7 +357,8 @@ void freeHeaders( struct headers *input )
   {
     p = input;
     input = input->next;
-    free(p->header);
+    if( p->header != NULL )
+      free(p->header);
     free(p);
   }
   return;
@@ -371,6 +390,7 @@ int establishConnection( int *sock, char *hostname )
   return 0; /* Successful Connection */
 }
 
+/* Searches the linked list to find a key, returns the value */
 char *findValue( struct headers *head, char *key )
 {
   struct headers *p = head;
@@ -393,6 +413,7 @@ char *findValue( struct headers *head, char *key )
   return NULL;
 }
 
+/* Reads in the input from a file descriptor and returns what it read */
 char *readResponse( int connfd )
 {
   char *response = NULL;
@@ -424,6 +445,7 @@ char *readResponse( int connfd )
   return response;
 }
 
+/* Reads what a server says and just forwards it to a client */
 int transfer( int clientfd, int serverfd, char *request_line )
 {
   char buffer[MAXLINE];
@@ -447,10 +469,12 @@ int check_blacklist( char *word, char *blacklist[], int size )
   for( i = 0; i < size; ++i )
   {
     char *temp = NULL;
+    /* Check the prefix */
     if(strncmp(word, blacklist[i], strlen(blacklist[i])) == 0)
     {
       return 1;
     }
+    /* Check the suffix */
     if( (temp = strstr(word,blacklist[i])) != NULL && strcmp(temp, blacklist[i]) == 0 )
     {
       return 1;
@@ -459,29 +483,35 @@ int check_blacklist( char *word, char *blacklist[], int size )
   return 0;
 }
 
-void print_client_request( char *client_name, struct request *r )
+/* Prints (most of) the required output */
+void print_client_request( char *client_name, char *req )
 {
+  char *t;
   printf("%s: ", client_name);
-  if( r->method == GET )
-    printf("GET ");
-  else if( r->method == POST )
-    printf("POST ");
-  else if( r->method == HEAD )
-    printf("HEAD ");
-  printf("%s ", r->full_resource);
+  if( (t = strstr(req, "HTTP/")) != NULL )
+  {
+    int len = t-req;
+    char *out = (char *) malloc( len + 1);
+    memcpy(out, req, len);
+    out[len] = '\0';
+    printf("%s ", out);
+    free(out);
+  }
+  else
+  {
+    printf("%s ", req);
+  }
   return;
 }
 
 void freeRequestInfo( struct request *r )
 {
   if( r->full_resource != NULL )
-  {
     free(r->full_resource);
-  }
+
   if( r->resource != NULL )
-  {
     free(r->resource);
-  }
+
   free(r);
   return;
 }
